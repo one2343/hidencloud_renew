@@ -240,80 +240,77 @@ class HidenCloudBot:
         self.log(f">>> 处理服务 ID: {service['id']}")
 
         try:
-            # 💡 核心修改：利用循环，让单个脚本执行时能够自动发起第2次请求触发跳转
-            for attempt in range(1, 3):
-                # 1. 获取管理页面
-                manage_res = self.request('GET', f"/service/{service['id']}/manage")
-                soup = BeautifulSoup(manage_res.text, 'html.parser')
+            # 1. 优先查缺补漏：先处理可能遗留的未支付历史账单
+            self.check_and_pay_invoices(service['id'], is_precheck=True)
 
-                # ================== 检测是否允许续期 ==================
-                renew_btn = soup.find('button', onclick=re.compile(r'showRenewAlert'))
-                
-                if renew_btn:
-                    onclick_val = renew_btn['onclick']
-                    # 正则提取参数: showRenewAlert(15, 1, true)
-                    match = re.search(r'showRenewAlert\((\d+),\s*(\d+),\s*(true|false)\)', onclick_val)
-                    
-                    if match:
-                        days_until = int(match.group(1))
-                        threshold = int(match.group(2))
-                        is_free = match.group(3) == 'true'
+            # 2. 获取管理页面获取最新状态
+            manage_res = self.request('GET', f"/service/{service['id']}/manage")
+            soup = BeautifulSoup(manage_res.text, 'html.parser')
 
-                        # 模拟网页 JS 逻辑判断
-                        if days_until > threshold:
-                            threshold_text = "1 day" if threshold == 1 else f"{threshold} days"
-                            
-                            if is_free:
-                                msg = f"You can only renew your free service when there is less than {threshold_text} left before it expires. Your service expires in {days_until} days."
-                            else:
-                                msg = f"You can only renew your service when there is less than {threshold_text} left before it expires. Your service expires in {days_until} days."
-                            
-                            self.log(f"⏳ 暂未到达续期时间: {msg}")
-                            return # 未到续期限制，直接退出处理下一个
+            # ================== 3. 检测是否允许续期 ==================
+            renew_btn = soup.find('button', onclick=re.compile(r'showRenewAlert'))
+            if renew_btn:
+                onclick_val = renew_btn['onclick']
+                match = re.search(r'showRenewAlert\((\d+),\s*(\d+),\s*(true|false)\)', onclick_val)
+                if match:
+                    days_until = int(match.group(1))
+                    threshold = int(match.group(2))
+                    is_free = match.group(3) == 'true'
 
-                # ==========================================================
-                
-                token_input = soup.find('input', attrs={'name': '_token'})
-                
-                if not token_input:
-                    self.log(f"❌ 无法找到续期 Token (可能是服务已到期或页面结构变更)")
-                    return
+                    if days_until > threshold:
+                        threshold_text = "1 day" if threshold == 1 else f"{threshold} days"
+                        if is_free:
+                            msg = f"免费服务剩余时间低于 {threshold_text} 才可续期。当前剩余: {days_until} 天。"
+                        else:
+                            msg = f"剩余时间低于 {threshold_text} 才可续期。当前剩余: {days_until} 天。"
+                        
+                        self.log(f"⏳ 暂未到达续期时间: {msg}")
+                        return # 尚未到达限制，直接退出处理下一个
 
-                form_token = token_input['value']
+            # ================== 4. 执行单次精准续期 ==================
+            token_input = soup.find('input', attrs={'name': '_token'})
+            if not token_input:
+                self.log("❌ 无法找到续期 Token (可能是服务已到期或页面结构变更)")
+                return
+
+            form_token = token_input['value']
+            self.log(f"提交续期 ({RENEW_DAYS}天)...")
+            sleep_random(1000, 2000)
+
+            payload = {'_token': form_token, 'days': RENEW_DAYS}
+            headers = {
+                'X-CSRF-TOKEN': self.csrf_token,
+                'Referer': f"https://dash.hidencloud.com/service/{service['id']}/manage"
+            }
+            
+            res = self.request('POST', f"/service/{service['id']}/renew", data=payload, headers=headers)
+
+            # ================== 5. 结果校验与支付 ==================
+            if '/invoice/' in res.url:
+                self.log("⚡️ 续期成功，已跳转账单页，自动执行支付...")
+                self.perform_pay_from_html(res.text, res.url)
+            else:
+                # 核心改进：提取服务端拦截的真实报错信息
+                soup_err = BeautifulSoup(res.text, 'html.parser')
+                err_div = soup_err.find('div', class_=re.compile(r'(alert-danger|text-danger|error)'))
                 
-                if attempt == 1:
-                    self.log(f"提交续期 ({RENEW_DAYS}天)...")
+                if err_div:
+                    # 抓取到了红字警告，说明被服务端逻辑拦截（如总时长超出上限等）
+                    self.log(f"⚠️ 续期请求被服务端拒绝，页面提示: {err_div.get_text(strip=True)}")
                 else:
-                    self.log(f"♻️ 触发第 {attempt} 次提交以获取账单跳转...")
-
-                sleep_random(1000, 2000)
-
-                payload = {'_token': form_token, 'days': RENEW_DAYS}
-                headers = {
-                    'X-CSRF-TOKEN': self.csrf_token,
-                    'Referer': f"https://dash.hidencloud.com/service/{service['id']}/manage"
-                }
-                
-                res = self.request('POST', f"/service/{service['id']}/renew", data=payload, headers=headers)
-
-                # ================= 💡 成功的关键判断在这里 =================
-                if '/invoice/' in res.url:
-                    self.log("⚡️ 续期成功，前往支付")
-                    self.perform_pay_from_html(res.text, res.url)
-                    return # 获取并支付成功，结束当前服务的处理（跳出重试循环）
-                else:
-                    if attempt < 2:
-                        self.log("⚠️ 第一次请求已发送，但未跳转账单，稍后自动重试...")
-                        sleep_random(2000, 4000)
-                    else:
-                        self.log("⚠️ 续期请求已发送，暂未自动跳转...")
-                        self.check_and_pay_invoices(service['id'])
+                    self.log("⚠️ 提交成功但未自动跳转，可能异步生成。后置检查账单...")
+                    self.check_and_pay_invoices(service['id'], is_precheck=False)
 
         except Exception as e:
             self.log(f"处理异常: {e}")
 
-    def check_and_pay_invoices(self, service_id):
-        sleep_random(2000, 3000)
+    def check_and_pay_invoices(self, service_id, is_precheck=False):
+        """
+        is_precheck 标志用于控制日志输出，防止前置检查时刷屏
+        """
+        if not is_precheck:
+            sleep_random(2000, 3000)
+            
         try:
             res = self.request('GET', f"/service/{service_id}/invoices?where=unpaid")
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -326,9 +323,11 @@ class HidenCloudBot:
             unique_invoices = list(set(invoice_links))
             
             if not unique_invoices:
-                self.log("✅ 无未支付账单")
+                if not is_precheck:
+                    self.log("⚪ 无未支付账单")
                 return
 
+            self.log(f"🔍 发现 {len(unique_invoices)} 个未付账单，准备清理...")
             for url in unique_invoices:
                 self.pay_single_invoice(url)
                 sleep_random(3000, 5000)
