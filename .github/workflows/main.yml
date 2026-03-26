@@ -42,21 +42,65 @@ jobs:
         WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
         WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
       run: |
-            set +e
-
-            echo "=== Attempt 1 ==="
-            python main.py
-            code=$?
-
-            if [ "$code" -eq 0 ]; then
-              echo "Attempt 1 succeeded"
-              exit 0
-            fi
-
-            echo "Attempt 1 failed with exit code: $code"
-            echo "Sleep 10 minutes before retry..."
-            sleep 600
-
-            echo "=== Attempt 2 ==="
-            python main.py
-            exit $?
+        set +e
+    
+        echo "::group::🚀 HidenCloud Renew - Attempt 1"
+        echo "========================================"
+        echo "🚀 HidenCloud Renew - Attempt 1"
+        echo "========================================"
+    
+        python main.py 2>&1 | tee attempt1.log
+        code=${PIPESTATUS[0]}
+    
+        echo "::group::🔎 Attempt 1 Highlights"
+        grep -E '\[RENEW_RESULT\]|\[COOKIE_NORMALIZED\]|支付成功|续期成功|登录失败|重跑|失败' attempt1.log || true
+        echo "::endgroup::"
+        echo "::endgroup::"
+    
+        if [ "$code" -eq 0 ]; then
+          echo "::notice title=HidenCloud Renew::✅ Attempt 1 succeeded"
+          {
+            echo "## HidenCloud Renew"
+            echo "- ✅ Attempt 1 succeeded"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+    
+        echo "::warning title=HidenCloud Renew::⚠️ Attempt 1 failed with exit code $code"
+        {
+          echo "## HidenCloud Renew"
+          echo "- ⚠️ Attempt 1 failed with exit code $code"
+          echo "- ⏳ Sleep 10 minutes before retry"
+        } >> "$GITHUB_STEP_SUMMARY"
+    
+        sleep 600
+    
+        echo "::group::🔁 HidenCloud Renew - Attempt 2"
+        echo "========================================"
+        echo "🔁 HidenCloud Renew - Attempt 2"
+        echo "========================================"
+    
+        python main.py 2>&1 | tee attempt2.log
+        code=${PIPESTATUS[0]}
+    
+        echo "::group::🔎 Attempt 2 Highlights"
+        grep -E '\[RENEW_RESULT\]|\[COOKIE_NORMALIZED\]|支付成功|续期成功|登录失败|重跑|失败' attempt2.log || true
+        echo "::endgroup::"
+        echo "::endgroup::"
+    
+        if [ "$code" -eq 0 ]; then
+          echo "::notice title=HidenCloud Renew::✅ Attempt 2 succeeded"
+          {
+            echo "## HidenCloud Renew"
+            echo "- ✅ Attempt 2 succeeded"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+    
+        echo "::error title=HidenCloud Renew::❌ Attempt 2 failed with exit code $code"
+        {
+          echo "## HidenCloud Renew"
+          echo "- ❌ Attempt 2 failed with exit code $code"
+        } >> "$GITHUB_STEP_SUMMARY"
+    
+        exit "$code"
